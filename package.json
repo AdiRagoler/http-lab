@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch --env-file=.env src/index.ts",
-    "push": "drizzle-kit push",
+    "db:setup": "psql \"$DATABASE_URL\" -f src/schema.sql",
     "typecheck": "tsc --noEmit"
   },
   "repository": {
@@ -21,7 +21,6 @@
   },
   "homepage": "https://github.com/AdiRagoler/http-lab#readme",
   "dependencies": {
-    "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
     "pg": "^8.23.0"
   },
@@ -29,7 +28,6 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.3.0",
     "@types/pg": "^8.23.1",
-    "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   }
