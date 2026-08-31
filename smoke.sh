@@ -39,6 +39,16 @@ cleanup() {
 
   echo
   echo "--- $PASS passed, $FAIL failed"
+
+  # A partial run used to report "0 failed" and look like a pass. Count the
+  # assertions in this file and complain if we didn't reach the end.
+  local want
+  want=$(grep -cE '^[[:space:]]*(call|call_raw|contains|count)[[:space:]]' "$0")
+  if [ "$((PASS + FAIL))" -ne "$want" ]; then
+    echo "--- INCOMPLETE: ran $((PASS + FAIL)) of $want assertions"
+    exit 1
+  fi
+
   [ "$FAIL" -eq 0 ] || exit 1
 }
 trap cleanup EXIT
@@ -49,10 +59,10 @@ trap cleanup EXIT
 call() {
   local method=$1 path=$2 want=$3 data=${4-} out code
   if [ -n "$data" ]; then
-    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$BASE$path" \
+    out=$(curl -s --max-time 10 -w $'\n%{http_code}' -X "$method" "$BASE$path" \
             -H 'Content-Type: application/json' -d "$data")
   else
-    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$BASE$path")
+    out=$(curl -s --max-time 10 -w $'\n%{http_code}' -X "$method" "$BASE$path")
   fi
   code=${out##*$'\n'}
   BODY=${out%$'\n'*}
@@ -63,7 +73,7 @@ call() {
 call_raw() {
   local method=$1 path=$2 want=$3; shift 3
   local out code
-  out=$(curl -s -w $'\n%{http_code}' -X "$method" "$BASE$path" "$@")
+  out=$(curl -s --max-time 10 -w $'\n%{http_code}' -X "$method" "$BASE$path" "$@")
   code=${out##*$'\n'}
   BODY=${out%$'\n'*}
   record "$code" "$want" "$method $path (raw)"
@@ -86,6 +96,18 @@ contains() {
     PASS=$((PASS + 1)); printf '  ok         body contains %s\n' "$1"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL       body missing %s\n        %s\n' "$1" "$BODY"
+  fi
+}
+
+# count SUBSTRING N — asserts SUBSTRING appears exactly N times in the last body.
+# '"id":' matches the id field only; "user_id": has an underscore before id.
+count() {
+  local got
+  got=$(printf '%s' "$BODY" | grep -o -- "$1" | wc -l | tr -d ' ')
+  if [ "$got" = "$2" ]; then
+    PASS=$((PASS + 1)); printf '  ok         %s x%s\n' "$1" "$2"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL       %s want x%s got x%s\n        %s\n' "$1" "$2" "$got" "$BODY"
   fi
 }
 
@@ -134,6 +156,63 @@ call GET    "/tasks/$T1" 404                # ...and it's gone
 
 call GET "/users/$U1/tasks" 200
 contains '\[\]'
+
+# --- pagination --------------------------------------------------------------
+#
+# Three tasks, created in order, so created_at + id ordering is deterministic.
+# Every assertion below uses a single-row page, so none of them depend on the
+# join preserving the derived table's ordering.
+
+echo "--- pagination"
+
+call POST "/users/$U1/tasks" 201 '{"body":"page-1"}'
+P1=$(field id); TASK_IDS="$TASK_IDS $P1"
+call POST "/users/$U1/tasks" 201 '{"body":"page-2"}'
+P2=$(field id); TASK_IDS="$TASK_IDS $P2"
+call POST "/users/$U1/tasks" 201 '{"body":"page-3"}'
+P3=$(field id); TASK_IDS="$TASK_IDS $P3"
+
+# no params: DEFAULT_LIMIT is 10, so all three come back
+call GET "/users/$U1/tasks" 200
+count '"id":' 3
+
+# limit is a row count, and ordering is oldest first
+call GET "/users/$U1/tasks?limit=1" 200
+count '"id":' 1
+contains 'page-1'
+
+# offset skips ROWS, not pages
+call GET "/users/$U1/tasks?limit=1&offset=1" 200
+count '"id":' 1
+contains 'page-2'
+
+# offset past the end: the user still exists, so 200 [] and never 404
+call GET "/users/$U1/tasks?offset=99" 200
+contains '\[\]'
+
+# limit=0 is a valid empty page, not a bad request
+call GET "/users/$U1/tasks?limit=0" 200
+contains '\[\]'
+
+# over MAX_LIMIT clamps silently to 50 rather than erroring
+call GET "/users/$U1/tasks?limit=500" 200
+count '"id":' 3
+
+# invalid values must 400 — never fall back to the default, and never reach
+# Postgres as NULL, which would mean LIMIT NULL = no limit at all.
+call GET "/users/$U1/tasks?limit=abc"    400
+call GET "/users/$U1/tasks?limit=-1"     400
+call GET "/users/$U1/tasks?limit=1.5"    400
+call GET "/users/$U1/tasks?limit=1e3"    400
+call GET "/users/$U1/tasks?offset=abc"   400
+call GET "/users/$U1/tasks?offset=-1"    400
+
+# a repeated param arrives as an array, not a string, so z.string() rejects it
+call GET "/users/$U1/tasks?limit=1&limit=2" 400
+
+# unknown params are stripped by z.object, not rejected
+call GET "/users/$U1/tasks?foo=bar" 200
+count '"id":' 3
 
 # --- 400: malformed requests -------------------------------------------------
 

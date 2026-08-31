@@ -3,6 +3,10 @@ import { ERRORS } from "./errors.js";
 import { z } from "zod";
 import type { Request, Response } from "express";
 
+const DEFAULT_LIMIT = 10;
+const DEFAULT_OFFSET = 0;
+const MAX_LIMIT = 50;
+
 type Task = {
   id: string;
   user_id: string;
@@ -18,6 +22,7 @@ type User = {
 
 type JoinedTaskRow = { [K in keyof Task]: Task[K] | null };
 
+//Requests handlers
 async function createUser(req: Request, res: Response) {
     const username = req.body?.username;
     if (typeof username !== "string" || username.trim() === "") {
@@ -69,20 +74,24 @@ async function getTask(req: Request, res: Response) {
 
 async function getTasksByUserId(req: Request, res: Response) {
     const id = parseId(req.params.userId);
-    if (id === null) { 
-        invalidReq(res); 
-        return; 
+    const query = parsePagination(req.query);
+
+    if (id === null || query === null) {
+        invalidReq(res);
+        return;
     }
     
-    const result = await pool.query<JoinedTaskRow>(`SELECT tasks.id,
-                                        tasks.user_id,
-                                        tasks.body,
-                                        tasks.done,
-                                        tasks.created_at
-                                    FROM users
-                                    LEFT JOIN tasks ON users.user_id = tasks.user_id
-                                    WHERE users.user_id = $1;`, 
-                                    [id]);
+    const result = await pool.query<JoinedTaskRow>(`SELECT tasks.id, 
+                                                    tasks.user_id, 
+                                                    tasks.body, 
+                                                    tasks.done, 
+                                                    tasks.created_at
+                                                    FROM users
+                                                    LEFT JOIN ( SELECT * FROM tasks WHERE user_id = $1
+                                                                ORDER BY created_at, id LIMIT $2 OFFSET $3 ) tasks
+                                                    ON users.user_id = tasks.user_id
+                                                    WHERE users.user_id = $1`, 
+                                                    [id, query.limit, query.offset]);
     if (result.rows[0] === undefined) {
         nonExistentId(res);
         return;
@@ -144,17 +153,35 @@ function nonExistentId(res: Response) {
     return;
 }
 
+//schemas
 const idSchema = z.string()
                 .regex(/^[1-9]\d*$/)
                 .transform(Number)
                 .refine(Number.isSafeInteger);
 
+const nonNegInt = z.string().regex(/^\d+$/).transform(Number).refine(Number.isSafeInteger);
+
+const pageQuerySchema = z.object({
+  limit:  nonNegInt.transform(n => Math.min(n, MAX_LIMIT)).optional(),
+  offset: nonNegInt.optional(),
+});
+
+//helpers
 function parseId(raw: unknown): number | null {
     const parsed = idSchema.safeParse(raw);
     if (!parsed.success) {
         return null;
     }
     return parsed.data;
+}
+
+function parsePagination(raw: unknown) {
+  const parsed = pageQuerySchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    limit:  parsed.data.limit  ?? DEFAULT_LIMIT,
+    offset: parsed.data.offset ?? DEFAULT_OFFSET,
+  };
 }
 
 export {createTask, createUser, getTask, getTasksByUserId, updateTaskDone, deleteTask};
