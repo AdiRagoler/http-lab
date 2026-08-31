@@ -154,9 +154,28 @@ call GET  /users/abc/tasks 400
 # no Content-Type: express.json() skips, req.body is undefined in Express 5
 call_raw POST "/users/$U1/tasks" 400 -d '{"body":"x"}'
 
-# malformed JSON: 400, but body-parser's HTML — not your JSON error shape.
-# Passes on status today; revisit once the error middleware lands.
+# malformed JSON: thrown inside express.json() before any handler runs, so the
+# error middleware is the only thing that can answer it.
 call POST /users 400 '{"username":'
+contains 'bad_req'
+
+# --- 413 / 415: express.json() rejects before routing ------------------------
+
+echo "--- 413 payload too large"
+
+# limit is 5kb; 6000 x's plus quotes is comfortably over.
+BIG=$(printf 'x%.0s' $(seq 1 6000))
+call POST "/users/$U1/tasks" 413 "{\"body\":\"$BIG\"}"
+contains 'body_too_large'
+
+echo "--- 415 unsupported charset"
+
+# a charset body-parser will not decode (anything not starting "utf-").
+# 400 / 413 / 415 is the complete set of statuses express.json() can throw, so
+# the middleware's three branches cover it with nothing left leaking to 500.
+call_raw POST /users 415 \
+  -H 'Content-Type: application/json; charset=iso-8859-1' \
+  -d '{"username":"smoke-415"}'
 
 # --- 404: well-formed, not there ---------------------------------------------
 

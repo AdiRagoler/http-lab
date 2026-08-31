@@ -1,10 +1,22 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
+import { rateLimit } from "express-rate-limit";
 import { createTask, createUser, getTask, getTasksByUserId, updateTaskDone, deleteTask } from "./tasks.js";
+import { ERRORS } from "./errors.js";
+
+const limiter = rateLimit({
+  windowMs: 60000,
+  limit: 100,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: ERRORS.rateLimited,
+});
 
 const listeningPort = 3003;
 const app = express();
-app.use(express.json());
+
+app.use(limiter);
+app.use(express.json({ limit: "5kb" }));
 
 app.post('/users/:userId/tasks', createTask);
 
@@ -23,39 +35,24 @@ app.use((err: unknown, _req: Request, res: Response, _next:NextFunction) => {
     typeof err === "object" && err !== null && "status" in err
         ? err.status
         : undefined;
-    
-    const code = 
-    typeof err === "object" && err !== null && "code" in err
-        ? err.code
-        : undefined;
 
     if (status === 400) {
-        res.status(400).json({
-            error: {
-            code: "bad_req",
-            message: "Invalid Request",
-            },
-        });
+        res.status(400).json(ERRORS.badReq);
         return;
     }
 
-    if (code === "23503") {
-        res.status(404).json({
-            error: {
-                code: "no_such_user",
-                message: "This User doesn't exist",
-            }
-        });
+    if (status === 413) {
+        res.status(413).json(ERRORS.bodyTooLarge);
+        return;
+    }
+
+    if (status === 415) {
+        res.status(415).json(ERRORS.badChar);
         return;
     }
 
     console.error(err);
-    res.status(500).json({
-        error: {
-            code: "internal_error",
-            message: "Something went wrong",
-        },
-    });
+    res.status(500).json(ERRORS.internalError);
     });
 
 app.listen(listeningPort, () => {
